@@ -1,4 +1,5 @@
 # DeskLine — Project Plan
+
 ### ASP.NET Core (C#) + React (TypeScript) + PostgreSQL
 
 This document outlines DeskLine's engineering process: design before implementation, security treated as a first-class concern rather than an afterthought, and a deliberate design-then-build workflow that mirrors how a production engineering team operates.
@@ -7,7 +8,7 @@ This document outlines DeskLine's engineering process: design before implementat
 
 ## 0. Development Approach
 
-**Design-first discipline:** system design decisions (architecture, data model, API contracts), threat modeling, test strategy, monitoring, and deployment configuration are all worked out and documented *before* the corresponding code is written.
+**Design-first discipline:** system design decisions (architecture, data model, API contracts), threat modeling, test strategy, monitoring, and deployment configuration are all worked out and documented _before_ the corresponding code is written.
 
 **Rule applied throughout the project:** no code is written for a component until a design artifact exists for it — a diagram, a table, or a short document. This is slower up front and faster overall, and it's also the part of a junior engineer's work that's hardest to fake: the ability to design, not just to type.
 
@@ -15,18 +16,19 @@ This document outlines DeskLine's engineering process: design before implementat
 
 ## 1. Environment Setup
 
-| Tool | Purpose | Install |
-|---|---|---|
-| .NET 8 SDK | Runs/builds the API | https://dotnet.microsoft.com/download |
-| Visual Studio 2022 Community *or* VS Code + C# Dev Kit extension | IDE — VS 2022 offers a friendlier debugger for a first .NET project | Either works; VS 2022 recommended for Week 1 |
-| Docker Desktop | Runs PostgreSQL locally in a container, later containerizes the whole app | https://www.docker.com/products/docker-desktop |
-| DBeaver *or* pgAdmin | GUI to inspect the PostgreSQL database | DBeaver is lighter, works for any DB |
-| Postman *or* Insomnia | Manually test API endpoints, build a request collection | Either |
-| Node.js LTS + npm | Runs the React frontend | https://nodejs.org |
-| Git + GitHub account | Version control, CI/CD, the public portfolio repo | — |
-| EF Core CLI tools | Database migrations | `dotnet tool install --global dotnet-ef` |
+| Tool                                                             | Purpose                                                                   | Install                                        |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------- |
+| .NET 8 SDK                                                       | Runs/builds the API                                                       | https://dotnet.microsoft.com/download          |
+| Visual Studio 2022 Community _or_ VS Code + C# Dev Kit extension | IDE — VS 2022 offers a friendlier debugger for a first .NET project       | Either works; VS 2022 recommended for Week 1   |
+| Docker Desktop                                                   | Runs PostgreSQL locally in a container, later containerizes the whole app | https://www.docker.com/products/docker-desktop |
+| DBeaver _or_ pgAdmin                                             | GUI to inspect the PostgreSQL database                                    | DBeaver is lighter, works for any DB           |
+| Postman _or_ Insomnia                                            | Manually test API endpoints, build a request collection                   | Either                                         |
+| Node.js LTS + npm                                                | Runs the React frontend                                                   | https://nodejs.org                             |
+| Git + GitHub account                                             | Version control, CI/CD, the public portfolio repo                         | —                                              |
+| EF Core CLI tools                                                | Database migrations                                                       | `dotnet tool install --global dotnet-ef`       |
 
 **Verification checklist** — run these and confirm output before proceeding:
+
 ```
 dotnet --version        # should show 8.x
 docker --version
@@ -37,6 +39,7 @@ dotnet ef --version      # confirms EF CLI tool installed
 ```
 
 **PostgreSQL runs in Docker, not installed natively**, from day one — this also mirrors the pattern used for containerized deployment later.
+
 ```
 docker run --name helpdesk-db -e POSTGRES_PASSWORD=devpassword -p 5432:5432 -d postgres:16
 ```
@@ -52,6 +55,7 @@ This phase produces the design artifacts the rest of the project is implemented 
 ### 2.1 Requirements
 
 See `requirements.md` for the full functional and non-functional requirements document, covering:
+
 - **Functional requirements**, grouped by role:
   - Customer: submit ticket, view own tickets, comment on own tickets, view status
   - Agent: view assigned tickets, update status, add internal notes vs. customer-visible replies
@@ -89,6 +93,8 @@ Before any controller exists, the API contract is documented as a table:
 | POST | /api/v1/auth/register | No | — | Create account |
 | POST | /api/v1/auth/login | No | — | Get access + refresh token |
 | POST | /api/v1/auth/refresh | No (refresh token) | — | Rotate tokens |
+| POST | /api/v1/auth/logout | Yes | — | Revoke current session's refresh token |
+| POST | /api/v1/auth/logout-all | Yes | — | Revoke all refresh tokens for the authenticated user |
 | GET | /api/v1/tickets | Yes | Customer (own), Agent (assigned), Admin (all) | List tickets |
 | POST | /api/v1/tickets | Yes | Customer | Create ticket |
 | PATCH | /api/v1/tickets/{id}/status | Yes | Agent, Admin | Update status |
@@ -112,6 +118,7 @@ This avoids the "fat controller" pattern common in tutorials, where business log
 ### 2.5 Auth Flow Design
 
 Two **sequence diagrams** define the auth flow (Excalidraw, or numbered steps in a doc):
+
 1. Register → email verification → login → receive access + refresh token → access token expires → refresh flow → logout (refresh token revoked)
 2. Forgot password → reset token emailed → token validated → password updated
 
@@ -121,17 +128,18 @@ The rationale — a short-lived access token paired with a longer-lived, revocab
 
 For each major flow — auth, ticket creation, file upload, admin actions — the threat model documents what could go wrong and the corresponding mitigation. Example row:
 
-| Flow | Threat | Mitigation |
-|---|---|---|
-| Login | Brute-force password guessing | Rate limit login endpoint, account lockout after N failures |
-| Ticket view | Customer A reads Customer B's ticket (broken access control) | Authorization check on every query, not just UI hiding |
-| File upload | Malicious file uploaded (webshell, oversized file) | Validate file type + size server-side, store outside web root |
-| Audit log | Agent or admin tampers with or deletes log entries to hide an action | Audit log is append-only — no update/delete endpoint exposed, ever |
+| Flow        | Threat                                                               | Mitigation                                                         |
+| ----------- | -------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Login       | Brute-force password guessing                                        | Rate limit login endpoint, account lockout after N failures        |
+| Ticket view | Customer A reads Customer B's ticket (broken access control)         | Authorization check on every query, not just UI hiding             |
+| File upload | Malicious file uploaded (webshell, oversized file)                   | Validate file type + size server-side, store outside web root      |
+| Audit log   | Agent or admin tampers with or deletes log entries to hide an action | Audit log is append-only — no update/delete endpoint exposed, ever |
 
 This is the project's security design document, and among the most interview-relevant artifacts in the whole project — "walk me through how you thought about security" is a real interview question, and most junior candidates have nothing comparable to show for it.
 
 **End of Week 1 deliverables:**
-- [ ] Requirements doc (functional + non-functional)
+
+- [✅] Requirements doc (functional + non-functional)
 - [ ] ERD
 - [ ] API contract table
 - [ ] Architecture diagram + folder structure sketch
@@ -147,11 +155,13 @@ Implementation does not begin until all deliverables above are complete and revi
 Built in **vertical slices** (one full feature end-to-end: DB → API → frontend), not horizontal layers (not "all DB tables first, then all controllers"). This mirrors how production teams ship and keeps something demoable at every stage.
 
 **Week 2:**
+
 - Day 1–2: Auth (register, login, JWT issuance, refresh token flow) — implemented against the Week 1 design
 - Day 3: User/role management, EF Core migrations, seed data (including demo accounts — see below)
 - Day 4–5: Ticket CRUD (Customer-facing side), authorization checks, audit log writes wired into every mutation from day one
 
 **Week 3:**
+
 - Day 1–2: Agent workflows (assignment, status transitions, internal vs. customer-visible notes)
 - Day 3: Admin endpoints, basic analytics query, SLA background service (checks all three metrics — First Response, Next Response, Resolution — against their respective deadlines)
 - Day 4: File upload with validation, email notification on status change
@@ -160,9 +170,10 @@ Built in **vertical slices** (one full feature end-to-end: DB → API → fronte
 Each vertical slice follows a test-alongside-implementation approach: a test is written for each slice before moving to the next, rather than deferring testing to the end — so gaps in understanding of a feature surface immediately, not in Week 4.
 
 **Portfolio-readiness items folded in as work progresses, not bolted on at the end:**
+
 - **Demo accounts + seed data** (Week 2, Day 3): one seeded Customer, Agent, and Admin login, documented in the README, so a reviewer can explore the live demo in under a minute without registering
 - **Feature branches + PRs into `main`**, even solo, with a short PR template — costs nothing and produces a genuine git workflow history
-- **One ADR (Architecture Decision Record) per major design choice**, written the week the choice is made — e.g. "why refresh tokens over long-lived JWTs," "why Clean Architecture," "why an append-only audit log." A few paragraphs each, kept in `/docs/adr/`, written as decisions happen across Weeks 1–3 rather than reconstructed retroactively in Week 4.
+- **A running decision log in decisions.md**, updated the week you make each major choice — e.g. "why refresh tokens over long-lived JWTs," "why Clean Architecture," "why an append-only audit log," "why SLA deadlines run on a 24/7 clock instead of business hours." A short entry each: the decision, the reasoning, and what you rejected instead. Do this as you go in Week 1–3; don't try to reconstruct your reasoning in Week 4.
 
 ---
 
@@ -174,7 +185,7 @@ A checklist walked explicitly, in order, each item treated as pass/fail:
 - [ ] JWT signing key strength + expiry correctly configured; refresh tokens rotate and can be revoked
 - [ ] Rate limiting on `/login`, `/register`, `/forgot-password`
 - [ ] Input validation (FluentValidation) on every incoming DTO
-- [ ] Authorization tested with a *negative* test: can Customer A fetch Customer B's ticket by ID? (test expects a 403 before it's trusted to work)
+- [ ] Authorization tested with a _negative_ test: can Customer A fetch Customer B's ticket by ID? (test expects a 403 before it's trusted to work)
 - [ ] CORS restricted to known origins only, not `AllowAnyOrigin`
 - [ ] HTTPS enforced, HSTS enabled
 - [ ] Secrets never in source control — checked in git history, not just current files
@@ -193,7 +204,7 @@ This checklist itself is portfolio material — a cleaned-up version appears in 
 
 - **Unit tests** (xUnit): business logic in the Application layer, with repositories mocked
 - **Integration tests**: `WebApplicationFactory` hitting real API endpoints against a test database (Testcontainers for Postgres — the production-realistic approach)
-- **Manual pass**: a Postman collection specifically covering role-based access *negative* cases (wrong role, wrong owner, expired token, missing token)
+- **Manual pass**: a Postman collection specifically covering role-based access _negative_ cases (wrong role, wrong owner, expired token, missing token)
 - **Frontend**: basic component tests, stretch goal only if time allows
 
 Coverage is not chased for its own sake. What's covered is authorization logic and the business rules that would actually break something if wrong — that's what a reviewer cares about, and it's worth being explicit about that priority.
@@ -224,12 +235,12 @@ Coverage is not chased for its own sake. What's covered is authorization logic a
 
 **A one-month timeline is realistic if scope stays disciplined.** Assuming roughly 3–4 hours/day, 6 days/week (a part-time pace, run alongside an active job search):
 
-| Week | Focus |
-|---|---|
-| 0 (few days) | Environment setup, tooling familiarization |
-| 1 | System design — all diagrams and docs from Section 2 |
-| 2–3 | Build, vertical slice by vertical slice |
-| 4 | Security hardening, testing pass, monitoring, CI/CD, deployment, docs |
+| Week         | Focus                                                                 |
+| ------------ | --------------------------------------------------------------------- |
+| 0 (few days) | Environment setup, tooling familiarization                            |
+| 1            | System design — all diagrams and docs from Section 2                  |
+| 2–3          | Build, vertical slice by vertical slice                               |
+| 4            | Security hardening, testing pass, monitoring, CI/CD, deployment, docs |
 
 **The risk to the timeline isn't the code — it's scope creep.** Real-time notifications, payment integration, a polished UI design system, multi-language support — none of that is in Section 2's core feature list, and none of it is added until the core system is deployed and solid. A "Stretch Goals" list is kept separately, addressed only after Week 4 is complete.
 
