@@ -38,6 +38,7 @@ A rule used throughout: every line item here is testable. If a requirement can't
 - FR-11: Add an internal note visible only to agents/admins
 - FR-12: Reassign a ticket to another agent
 - FR-13: See SLA status at a glance on their queue — which of the three metrics (if any) are breached per ticket
+- FR-13a: Set or change a ticket's priority (Low, Medium, High, Urgent). Defaults to Medium at creation; the customer cannot set or select it — only Agent/Admin can.
 
 ### 1.3 Admin
 
@@ -52,10 +53,11 @@ A rule used throughout: every line item here is testable. If a requirement can't
 
 - FR-20: Every mutating action on a ticket (create, status change, comment, reassignment) is written to an append-only audit log with actor, action, and timestamp
 - FR-20a: On creation, a ticket is automatically assigned to an agent via round-robin (the agent with the fewest currently open tickets, or next in rotation) — no ticket is ever left unassigned. Admin may manually reassign afterward (FR-16).
-- FR-21: SLA tracking — three independent metrics, each flagged by a scheduled background job (not computed on read):
-  - FR-21a: **First Response Time** — flagged "Overdue: First Response" if no agent reply within 4 hours of ticket creation
-  - FR-21b: **Next Response Time** — flagged "Overdue: Next Response" if, after a customer reply, no agent reply follows within 4 hours
-  - FR-21c: **Resolution Time** — flagged "Overdue: Resolution" if the ticket isn't marked Resolved within 48 hours of creation
+- FR-21: SLA tracking — three independent metrics, each flagged by a scheduled background job (not computed on read), with durations that vary by ticket Priority (see §4 for the full matrix):
+  - FR-21a: **First Response Time** — flagged "Overdue: First Response" if no agent reply within the priority-tiered duration of ticket creation (Urgent 1h / High 2h / Medium 4h / Low 8h)
+  - FR-21b: **Next Response Time** — flagged "Overdue: Next Response" if, after a customer reply, no agent reply follows within the same duration used for First Response at that ticket's priority
+  - FR-21c: **Resolution Time** — flagged "Overdue: Resolution" if the ticket isn't marked Resolved within the priority-tiered duration of creation (Urgent 8h / High 24h / Medium 48h / Low 120h)
+  - FR-21d: SLA durations are fixed per priority tier, defined in application code (not admin-editable in v1) — see §4
 - FR-22: File attachments are validated server-side (type + size) before storage
 - FR-23: Role-based access control is enforced server-side on every request, not just hidden in the UI
 
@@ -120,6 +122,7 @@ Helpdesk platforms in the market bundle in a wide surface area — multi-channel
 - Third-party integrations (CRM, external knowledge bases) via public API — no external API consumers in v1
 - Horizontal scaling / load testing — named in NFR-15 above
 - **Operational hours (business-hours SLA calendar)** — all three SLA metrics in Section 4 run on a 24/7 calendar-hours clock. A production ticketing system typically excludes nights, weekends, and holidays from SLA deadlines (e.g. a ticket filed at 6pm Friday doesn't breach a 4-hour SLA at 10pm the same night). That requires a business-calendar model with timezone and holiday handling — real complexity, but complexity about scheduling, not about ticketing domain design, so it's cut here deliberately
+- **Admin-configurable SLA policy durations** — v1's priority-tiered SLA durations (§4) are hardcoded in the Application layer, not stored in the database or editable by Admin. Deferred to Phase 2, alongside Operational Hours, since both are refinements to the SLA engine rather than new ticketing-domain concepts.
 
 Each of these is a legitimate feature _category_ in the market — the point isn't that they're bad ideas, it's that a focused, deeply-tested v1 is stronger portfolio material than a shallow attempt at all of them.
 
@@ -127,18 +130,31 @@ Each of these is a legitimate feature _category_ in the market — the point isn
 
 ## 4. SLA Domain Design
 
-Three independent deadline/flag pairs on `Ticket`, each maintained by its own background-job pass (or one job checking all three — an implementation choice for Week 1, not a requirements-level decision):
+## 4. SLA Domain Design
 
-| Metric         | Deadline field          | Flag field               | Set on                                                             | Cleared/resets on                                                                                                                                |
-| -------------- | ----------------------- | ------------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| First Response | `FirstResponseDeadline` | `IsFirstResponseOverdue` | `CreatedAt + 4h`                                                   | Never resets — either the first agent reply lands before the deadline or the flag stays true as a permanent record that this SLA was missed once |
-| Next Response  | `NextResponseDeadline`  | `IsNextResponseOverdue`  | `LastCustomerReplyAt + 4h`, set only while awaiting an agent reply | Cleared and re-armed on the _next_ customer reply; not tracked while the ball is in the customer's court                                         |
-| Resolution     | `ResolutionDeadline`    | `IsResolutionOverdue`    | `CreatedAt + 48h`                                                  | Never resets — a ticket resolved late keeps a permanent record of the breach                                                                     |
+Three independent deadline/flag pairs on `Ticket`, each maintained by its own background-job pass, with durations that vary by the ticket's `Priority`:
 
-Two design decisions locked in during Week 1 rather than left to be discovered mid-build:
+| Priority | First Response | Next Response | Resolution |
+|---|---|---|---|
+| Urgent | 1h | 1h | 8h |
+| High | 2h | 2h | 24h |
+| Medium | 4h | 4h | 48h |
+| Low | 8h | 8h | 120h (5 days) |
 
-- **Once breached, a flag does not always clear itself.** First Response and Resolution are treated as permanent breach records — useful for analytics (e.g. "how often was SLA missed") since that history shouldn't self-heal — while Next Response is the one metric that legitimately toggles on and off as the conversation continues.
-- **Next Response only applies while the ticket is waiting on the agent.** If the ticket is Closed, Resolved, or waiting on the _customer_ for more information, this deadline does not count down. This is a status-dependent condition encoded explicitly in the background job's query, not something that falls out for free.
+**Next Response deliberately mirrors First Response per tier** rather than being a separately-justified number — once a conversation is underway, the same urgency expectation should hold for follow-up replies as for the first one. This also means the code only needs to define one independent response-time value per tier, not two.
+
+| Metric | Deadline field | Flag field | Set on | Cleared/resets on |
+|---|---|---|---|---|
+| First Response | `FirstResponseDeadline` | `IsFirstResponseOverdue` | `CreatedAt + tier duration` | Never resets — permanent breach record |
+| Next Response | `NextResponseDeadline` | `IsNextResponseOverdue` | `LastCustomerReplyAt + tier duration`, armed only while awaiting an agent reply | Cleared and re-armed on the next customer reply; not tracked while the ball is in the customer's court |
+| Resolution | `ResolutionDeadline` | `IsResolutionOverdue` | `CreatedAt + tier duration` | Never resets — permanent breach record |
+
+Design decisions locked in during Week 1:
+
+- **Once breached, a flag does not always clear itself.** Same reasoning as before — First Response and Resolution are permanent breach records; Next Response is the one metric that legitimately toggles.
+- **Next Response only applies while the ticket is waiting on the agent** — unchanged from the original design.
+- **Durations are priority-tiered, not flat.** `Priority` defaults to `Medium` at creation and is set only by Agent/Admin (FR-13a) — never the Customer, to avoid every ticket being marked Urgent by whoever files it.
+- **Durations are hardcoded, not admin-configurable, in v1.** Implemented behind an `ISlaPolicyProvider` interface in the Application layer so a database-backed, Admin-editable implementation can be swapped in later (Phase 2) without changing the SLA background job or ticket-creation logic. An admin-configurable `SlaPolicy` table was considered and deferred — it would force a rethink of the append-only, ticket-scoped `AuditLog` design (a policy change has no natural `TicketId`), and duplicates a "Admin manages config via CRUD" pattern `Category` already demonstrates.
 
 ---
 

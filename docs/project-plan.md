@@ -18,7 +18,7 @@ This document outlines DeskLine's engineering process: design before implementat
 
 | Tool                                                             | Purpose                                                                   | Install                                        |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------- |
-| .NET 8 SDK                                                       | Runs/builds the API                                                       | https://dotnet.microsoft.com/download          |
+| .NET 10 SDK                                                       | Runs/builds the API                                                       | https://dotnet.microsoft.com/download          |
 | Visual Studio 2022 Community _or_ VS Code + C# Dev Kit extension | IDE — VS 2022 offers a friendlier debugger for a first .NET project       | Either works; VS 2022 recommended for Week 1   |
 | Docker Desktop                                                   | Runs PostgreSQL locally in a container, later containerizes the whole app | https://www.docker.com/products/docker-desktop |
 | DBeaver _or_ pgAdmin                                             | GUI to inspect the PostgreSQL database                                    | DBeaver is lighter, works for any DB           |
@@ -77,10 +77,11 @@ For each: fields, types, relationships, cardinality — documented as an **ERD**
 Two entities carry the most design weight:
 
 - **`AuditLog`** — captures every mutating action on a ticket: who did it (`ActorId`), what happened (`Action` — e.g. `StatusChanged`, `CommentAdded`, `Reassigned`), when (`Timestamp`), and enough detail to reconstruct it (`OldValue`/`NewValue` or a JSON payload column). This is implemented as a dedicated table with a foreign key to `Ticket`, rather than a generic polymorphic log — simpler, and sufficient at this project's scale.
-- **`Ticket`** carries three deadline/flag pairs to support SLA tracking — each flipped by a scheduled background job, never computed live on read:
-  - `FirstResponseDeadline` (`CreatedAt + 4h`) / `IsFirstResponseOverdue` — never self-clears; a permanent record that this SLA was missed once, useful for breach reporting even after the ticket closes
-  - `NextResponseDeadline` (`LastCustomerReplyAt + 4h`, armed only while awaiting an agent reply) / `IsNextResponseOverdue` — the one flag that legitimately resets, re-armed each time the customer replies again; does not count down while the ticket is Closed, Resolved, or waiting on the customer
-  - `ResolutionDeadline` (`CreatedAt + 48h`) / `IsResolutionOverdue` — never self-clears, same rationale as First Response
+- **`Ticket`** carries a `Priority` field (`Low`/`Medium`/`High`/`Urgent`, default `Medium`, set only by Agent/Admin — never the Customer) and three deadline/flag pairs to support SLA tracking, each flipped by a scheduled background job, never computed live on read. Durations vary by `Priority` (full matrix in `requirements.md` §4):
+  - `FirstResponseDeadline` (`CreatedAt` + priority-tiered duration) / `IsFirstResponseOverdue` — never self-clears; a permanent record that this SLA was missed once
+  - `NextResponseDeadline` (`LastCustomerReplyAt` + the same priority-tiered duration used for First Response, armed only while awaiting an agent reply) / `IsNextResponseOverdue` — the one flag that legitimately resets, re-armed each time the customer replies again
+  - `ResolutionDeadline` (`CreatedAt` + priority-tiered duration) / `IsResolutionOverdue` — never self-clears, same rationale as First Response
+  - Priority-tier durations are hardcoded in the Application layer behind an `ISlaPolicyProvider` interface, not admin-configurable in v1 (see D11 in `decisions.md`)
 
   **Explicitly out of scope for v1: Operational Hours.** All three deadlines run on a 24/7 calendar-hours clock rather than a business-hours calendar (9–5, excluding weekends/holidays). Business-hours SLA calendars are standard in production tools (Zendesk, Freshdesk) but require timezone and holiday-calendar handling — real complexity, but scheduling complexity rather than ticketing-domain complexity, so it's cut deliberately and named here rather than left to be discovered mid-build.
 
@@ -98,6 +99,7 @@ Before any controller exists, the API contract is documented as a table:
 | GET | /api/v1/tickets | Yes | Customer (own), Agent (assigned), Admin (all) | List tickets |
 | POST | /api/v1/tickets | Yes | Customer | Create ticket |
 | PATCH | /api/v1/tickets/{id}/status | Yes | Agent, Admin | Update status |
+| PATCH | /api/v1/tickets/{id}/priority | Yes | Agent, Admin | Set or update ticket priority |
 | ... | | | | remaining endpoints follow the same pattern |
 
 Request/response DTOs (field lists) for the 3–4 most important endpoints are sketched alongside this table — this is the contract implementation is written against.
@@ -256,6 +258,7 @@ These were considered and deliberately scoped out of the one-month core build �
 2. **Email-to-Ticket Parsing** — inbound email webhook (SendGrid Inbound Parse or Mailgun Routes, both with workable free tiers) that creates a ticket from an incoming email. Requires webhook signature verification and safe parsing of untrusted content — a good security exercise, just not a fast one.
 3. **Real-Time Live Chat** — in .NET this is **SignalR**, not Socket.io (Socket.io is Node-only). Free to use, but introduces persistent connection state, hub testing, and scaling considerations meaningfully different from the rest of this stack. Highest complexity of the four — attempted last, if at all.
 4. **Operational Hours (Business-Calendar SLAs)** — extends all three SLA deadlines to respect a configurable business-hours calendar (e.g. 9am–5pm, weekdays only) instead of running 24/7. Requires timezone-aware scheduling and holiday-calendar support. Lowest priority of the four Phase 2 items — pure scheduling complexity, with no new ticketing-domain concepts to demonstrate.
+5. **Admin-Configurable SLA Policies** — replace the hardcoded per-priority SLA durations (`requirements.md` §4) with an Admin-managed `SlaPolicy` table and CRUD endpoints, so durations can be changed without a code deploy. Deferred because it forces a rethink of the append-only, ticket-scoped `AuditLog` design (a policy change isn't ticket-scoped), and the codebase is already structured (`ISlaPolicyProvider`) so this is a drop-in later, not a rewrite.
 
 ---
 

@@ -31,10 +31,11 @@ It's also informed by hands-on helpdesk support experience, which shaped the fea
 - **Multi-role access:** Customer, Agent, Admin — enforced server-side, not just hidden in the UI
 - **Ticket lifecycle:** creation, status transitions, customer-visible replies vs. agent-only internal notes
 - **Append-only audit log:** every mutating action (status change, comment, reassignment) is recorded with actor, action, and timestamp — no update/delete endpoint exposed, ever
-- **SLA tracking (3 independent metrics),** flagged by a scheduled background job rather than computed on read:
-  - First Response Time (4h)
-  - Next Response Time (4h, resets as the conversation continues, pauses while waiting on the customer)
-  - Resolution Time (48h)
+- **Priority levels** (Low/Medium/High/Urgent) — set only by Agent/Admin during triage, never the customer, and default to Medium
+- **SLA tracking (3 independent metrics), durations tiered by priority,** flagged by a scheduled background job rather than computed on read:
+  - First Response Time (1h–8h depending on priority)
+  - Next Response Time (mirrors First Response per tier; resets as the conversation continues, pauses while waiting on the customer)
+  - Resolution Time (8h–120h depending on priority)
 - **File uploads** with server-side type/size validation
 - **Email notifications** on reply and status change
 - **JWT auth** with short-lived access tokens and revocable, rotating refresh tokens
@@ -47,6 +48,7 @@ Deferred deliberately, not discovered mid-build — see [`docs/requirements.md`]
 2. Email-to-ticket parsing (inbound webhook)
 3. Real-time chat (SignalR)
 4. Operational Hours / business-calendar SLA support (v1 SLAs run on a 24/7 clock)
+5. Admin-configurable SLA policy durations (v1 SLA tiers are hardcoded)
 
 ---
 
