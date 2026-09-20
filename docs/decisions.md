@@ -119,3 +119,49 @@ reconsidered or scoped out explicitly, rather than added.
 **Testability:** Every behavior reduces to standard, deterministic assertions filtered by `UserId` — no concurrency simulation or timing dependencies required: a login creates a row scoped to that user; two logins (simulating two devices) create two independent rows; refresh rotates a token and invalidates the one it replaced; reuse of an already-rotated token is rejected; logout revokes only the session tied to the token presented; logout-all revokes every row for that `UserId` while leaving other users' rows untouched.
 
 **Trade-off accepted:** More schema (a full table + FK instead of one column) and more logic (per-row lookups instead of a single field compare) than single-session requires. Also requires logout endpoints (single-session and "log out everywhere") to actually exercise the revocation this design enables — otherwise the extra structure buys nothing. These have been added to `requirements.md` (FR-1a, FR-1b) and the API contract table (`project-plan.md` §2.3) as a direct consequence of this decision.
+
+---
+
+## D9: Human-facing `TicketNumber` added outside the FR list
+
+**Decision:** `Ticket` gets an auto-incrementing `TicketNumber` (`#1`, `#2`, ...) alongside its internal `Guid Id` — permanent once assigned, never reassigned or reused.
+
+**Context:** Not required by any FR. A raw `Guid` works fine as an internal/API identifier but is unusable as something a customer or agent references in conversation.
+
+**Alternatives considered:** No human-facing number at all (simplest, but poor UX — matches no real helpdesk tool).
+
+**Rationale:** Real ticketing tools always expose a short reference number. Cost is a single Postgres `IDENTITY` column — the database handles atomic, correctly-ordered incrementing natively, no custom counter logic needed.
+
+**Trade-off accepted:** Postgres sequences aren't strictly gapless under transaction rollback. Irrelevant here — gapless numbering matters for regulated sequences like invoices, not support ticket references.
+
+---
+
+## D10: `Priority` field added to `Ticket`, Agent/Admin-only, defaults to `Medium`
+
+**Decision:** `Ticket.Priority` (`Low`/`Medium`/`High`/`Urgent`) defaults to `Medium` at creation. The Customer cannot set it; only Agent/Admin can set or change it (FR-13a).
+
+**Context:** Not in the original FR list. Added because priority is foundational to real ticket triage, and (per D11) ends up driving SLA duration.
+
+**Alternatives considered:**
+- Customer sets priority at creation — rejected: nearly everyone would pick "Urgent," making the field meaningless as a triage signal.
+- An `Unset`/`Untriaged` initial state instead of defaulting to `Medium` — rejected: since SLA deadlines are computed at creation time (FR-21a/c), before any agent has triaged the ticket, an `Unset` value would need an immediate fallback for SLA purposes anyway — reconstructing `Medium` with extra steps rather than avoiding it.
+
+**Rationale:** Defaulting to `Medium` is simpler and avoids a fallback branch in the SLA calculation that an `Unset` state would otherwise require.
+
+**Trade-off accepted:** Loses the ability to distinguish "not yet triaged" from "deliberately set to Medium" — a minor loss, since no FR asks for a "needs triage" view.
+
+---
+
+## D11: SLA durations vary by priority tier, hardcoded via `ISlaPolicyProvider` (not admin-configurable in v1)
+
+**Decision:** All three SLA metrics scale by `Ticket.Priority` instead of one flat duration for every ticket (matrix in `requirements.md` §4). Next Response uses the same duration as First Response per tier. Durations are fixed in application code behind an `ISlaPolicyProvider` interface — not stored in a database table, not Admin-editable in v1.
+
+**Context:** The original flat SLA (4h/4h/48h for every ticket) doesn't reflect real support urgency — an `Urgent` ticket and a `Low` ticket had identical deadlines.
+
+**Alternatives considered:**
+- **Admin-configurable `SlaPolicy` table + CRUD endpoints** — rejected for v1. Forces a rethink of the append-only, ticket-scoped `AuditLog` design (D3): a policy change has no natural `TicketId`, meaning either `AuditLog.TicketId` becomes nullable or a second, system-level log table is needed. Also duplicates the "Admin manages config via CRUD" pattern `Category` (FR-17) already demonstrates. Real added cost (new entity, migration, seed data, 2 endpoints, validation, new auth tests) disproportionate to a capability no FR currently requests.
+- **Flat Next Response, independent of priority** — rejected: inconsistent with a tiered First Response — an Urgent ticket would get fast initial contact but then slow back down to a generic wait on every follow-up, undermining the point of tiering it at all.
+
+**Rationale:** Hardcoding behind an interface gets real SLA-by-urgency behavior at minimal build cost, while staying swappable — a future Admin-configurable implementation is a new class behind the same interface, not a rewrite of the SLA background job or ticket-creation logic.
+
+**Trade-off accepted:** Changing a duration requires a code change + redeploy in v1. Not a second demonstration of admin-managed CRUD config — `Category` already covers that pattern.
