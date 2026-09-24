@@ -30,7 +30,7 @@ This document outlines DeskLine's engineering process: design before implementat
 **Verification checklist** — run these and confirm output before proceeding:
 
 ```
-dotnet --version        # should show 8.x
+dotnet --version        # should show 10.x
 docker --version
 docker run hello-world  # confirms Docker actually works, not just installed
 node --version           # should show an LTS 20.x or 22.x
@@ -60,24 +60,24 @@ See `requirements.md` for the full functional and non-functional requirements do
   - Customer: submit ticket, view own tickets, comment on own tickets, view status
   - Agent: view assigned tickets, update status, add internal notes vs. customer-visible replies
   - Admin: manage users, assign/reassign tickets, view all tickets, basic analytics
-  - Every ticket mutation (created, status changed, comment added, reassigned) is written to an audit log with actor, action, and timestamp
+  - Every ticket mutation (created, status changed, comment added, reassigned, priority changed) is written to an audit log with actor, action, and timestamp
   - SLA tracking across three metrics — First Response, Next Response, and Resolution Time (see 2.2 below)
 - **Non-functional requirements**, specific and defensible rather than vague:
   - Auth tokens expire in 15 min (access) / 7 days (refresh)
   - API responses under 300ms for standard CRUD operations
   - Passwords never logged or stored in plaintext, anywhere, including logs
-  - All admin actions traceable to a user via the audit log
+  - All ticket-related admin and agent actions traceable to a user via the audit log (non-ticket admin actions such as user and category management go to structured request logs — see D12)
 
 ### 2.2 Domain Modeling
 
-Entities: `User`, `Role`, `Ticket`, `TicketComment`, `Attachment`, `Category`, `AuditLog`.
+Entities: `User`, `RefreshToken`, `Ticket`, `TicketComment`, `Attachment`, `Category`, `AuditLog`.
 
 For each: fields, types, relationships, cardinality — documented as an **ERD**, built with [dbdiagram.io](https://dbdiagram.io) or sketched by hand in Excalidraw.
 
 Two entities carry the most design weight:
 
 - **`AuditLog`** — captures every mutating action on a ticket: who did it (`ActorId`), what happened (`Action` — e.g. `StatusChanged`, `CommentAdded`, `Reassigned`), when (`Timestamp`), and enough detail to reconstruct it (`OldValue`/`NewValue` or a JSON payload column). This is implemented as a dedicated table with a foreign key to `Ticket`, rather than a generic polymorphic log — simpler, and sufficient at this project's scale.
-- **`Ticket`** carries a `Priority` field (`Low`/`Medium`/`High`/`Urgent`, default `Medium`, set only by Agent/Admin — never the Customer) and three deadline/flag pairs to support SLA tracking, each flipped by a scheduled background job, never computed live on read. Durations vary by `Priority` (full matrix in `requirements.md` §4):
+- **`Ticket`** carries a human-facing `TicketNumber` (auto-incrementing integer alongside the internal `Guid Id`, permanent once assigned, never reused — see D9), a `Priority` field (`Low`/`Medium`/`High`/`Urgent`, default `Medium`, set only by Agent/Admin — never the Customer), and three deadline/flag pairs to support SLA tracking, each flipped by a scheduled background job, never computed live on read. Durations vary by `Priority` (full matrix in `requirements.md` §4):
   - `FirstResponseDeadline` (`CreatedAt` + priority-tiered duration) / `IsFirstResponseOverdue` — never self-clears; a permanent record that this SLA was missed once
   - `NextResponseDeadline` (`LastCustomerReplyAt` + the same priority-tiered duration used for First Response, armed only while awaiting an agent reply) / `IsNextResponseOverdue` — the one flag that legitimately resets, re-armed each time the customer replies again
   - `ResolutionDeadline` (`CreatedAt` + priority-tiered duration) / `IsResolutionOverdue` — never self-clears, same rationale as First Response
@@ -100,6 +100,8 @@ Before any controller exists, the API contract is documented as a table:
 | POST | /api/v1/tickets | Yes | Customer | Create ticket |
 | PATCH | /api/v1/tickets/{id}/status | Yes | Agent, Admin | Update status |
 | PATCH | /api/v1/tickets/{id}/priority | Yes | Agent, Admin | Set or update ticket priority |
+| POST | /api/v1/auth/forgot-password | No | — | Email a single-use reset link (same response whether or not the email exists) |
+| POST | /api/v1/auth/reset-password | No (reset token) | — | Set a new password; revokes all refresh tokens |
 | ... | | | | remaining endpoints follow the same pattern |
 
 Request/response DTOs (field lists) for the 3–4 most important endpoints are sketched alongside this table — this is the contract implementation is written against.
@@ -112,7 +114,8 @@ The system uses **Clean/Layered Architecture**:
 Presentation   → Controllers (HTTP in/out only, no business logic)
 Application    → Services / Use Cases (business rules live here)
 Domain         → Entities, enums, domain logic
-Infrastructure → EF Core, DbContext, external services (email, storage)
+Infrastructure → EF Core, DbContext, ASP.NET Core Identity (behind an interface), external services (email, storage)
+
 ```
 
 This avoids the "fat controller" pattern common in tutorials, where business logic lives directly in the controller: that pattern is untestable — business logic can't be unit tested without spinning up HTTP — and is exactly the kind of thing a code reviewer at a real company flags. The folder structure is sketched from this layering before implementation begins.
@@ -121,8 +124,8 @@ This avoids the "fat controller" pattern common in tutorials, where business log
 
 Two **sequence diagrams** define the auth flow (Excalidraw, or numbered steps in a doc):
 
-1. Register → email verification → login → receive access + refresh token → access token expires → refresh flow → logout (refresh token revoked)
-2. Forgot password → reset token emailed → token validated → password updated
+1. Register → login → receive access + refresh token → access token expires → refresh flow → logout (refresh token revoked)
+2. Forgot password → reset token emailed → token validated → password updated → all refresh tokens revoked
 
 The rationale — a short-lived access token paired with a longer-lived, revocable refresh token is safer than a single long-lived token — is documented in the corresponding ADR (see Section 3).
 
@@ -132,7 +135,7 @@ For each major flow — auth, ticket creation, file upload, admin actions — th
 
 | Flow        | Threat                                                               | Mitigation                                                         |
 | ----------- | -------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Login       | Brute-force password guessing                                        | Rate limit login endpoint, account lockout after N failures        |
+| Login       | Brute-force password guessing                                        | Rate limit login endpoint; lockout for 15 minutes after 5 failed attempts (NFR-4) |
 | Ticket view | Customer A reads Customer B's ticket (broken access control)         | Authorization check on every query, not just UI hiding             |
 | File upload | Malicious file uploaded (webshell, oversized file)                   | Validate file type + size server-side, store outside web root      |
 | Audit log   | Agent or admin tampers with or deletes log entries to hide an action | Audit log is append-only — no update/delete endpoint exposed, ever |
@@ -187,7 +190,7 @@ A checklist walked explicitly, in order, each item treated as pass/fail:
 - [ ] JWT signing key strength + expiry correctly configured; refresh tokens rotate and can be revoked
 - [ ] Rate limiting on `/login`, `/register`, `/forgot-password`
 - [ ] Input validation (FluentValidation) on every incoming DTO
-- [ ] Authorization tested with a _negative_ test: can Customer A fetch Customer B's ticket by ID? (test expects a 403 before it's trusted to work)
+- [ ] Authorization tested with a _negative_ test: can Customer A fetch Customer B's ticket by ID? (test expects a 404, identical to the response for a nonexistent ID, before it's trusted to work; wrong-role calls, e.g. a Customer hitting a status-change endpoint, expect 403)
 - [ ] CORS restricted to known origins only, not `AllowAnyOrigin`
 - [ ] HTTPS enforced, HSTS enabled
 - [ ] Secrets never in source control — checked in git history, not just current files
@@ -254,11 +257,12 @@ If available time is closer to 1–2 hours/day, the plan extends to 5–6 weeks 
 
 These were considered and deliberately scoped out of the one-month core build — not because they're bad ideas, but because each adds enough complexity or external dependency to put the deadline at risk. Attempted in this order, only once Sections 1–8 are done and deployed:
 
-1. **AI Ticket Triaging** — OpenAI API call on ticket creation to auto-categorize and set priority. Lowest cost/complexity of the four; API key never client-side, and the triggering endpoint rate-limited since it carries a real (small) per-call cost.
+1. **AI Ticket Triaging** — OpenAI API call on ticket creation to auto-categorize and set priority. Comparatively low cost and complexity; API key never client-side, and the triggering endpoint rate-limited since it carries a real (small) per-call cost.
 2. **Email-to-Ticket Parsing** — inbound email webhook (SendGrid Inbound Parse or Mailgun Routes, both with workable free tiers) that creates a ticket from an incoming email. Requires webhook signature verification and safe parsing of untrusted content — a good security exercise, just not a fast one.
-3. **Real-Time Live Chat** — in .NET this is **SignalR**, not Socket.io (Socket.io is Node-only). Free to use, but introduces persistent connection state, hub testing, and scaling considerations meaningfully different from the rest of this stack. Highest complexity of the four — attempted last, if at all.
-4. **Operational Hours (Business-Calendar SLAs)** — extends all three SLA deadlines to respect a configurable business-hours calendar (e.g. 9am–5pm, weekdays only) instead of running 24/7. Requires timezone-aware scheduling and holiday-calendar support. Lowest priority of the four Phase 2 items — pure scheduling complexity, with no new ticketing-domain concepts to demonstrate.
+3. **Real-Time Live Chat** — in .NET this is **SignalR**, not Socket.io (Socket.io is Node-only). Free to use, but introduces persistent connection state, hub testing, and scaling considerations meaningfully different from the rest of this stack. Highest complexity of the Phase 2 items — attempted only if time remains after the others.
+4. **Operational Hours (Business-Calendar SLAs)** — extends all three SLA deadlines to respect a configurable business-hours calendar (e.g. 9am–5pm, weekdays only) instead of running 24/7. Requires timezone-aware scheduling and holiday-calendar support. Lower priority than the items above — pure scheduling complexity, with no new ticketing-domain concepts to demonstrate.
 5. **Admin-Configurable SLA Policies** — replace the hardcoded per-priority SLA durations (`requirements.md` §4) with an Admin-managed `SlaPolicy` table and CRUD endpoints, so durations can be changed without a code deploy. Deferred because it forces a rethink of the append-only, ticket-scoped `AuditLog` design (a policy change isn't ticket-scoped), and the codebase is already structured (`ISlaPolicyProvider`) so this is a drop-in later, not a rewrite.
+6. **Email Verification on Registration** — confirm ownership of an email address before a new account can log in. Deferred because it adds a blocked-until-verified account state and resend logic for a flow that teaches the same token concept as password reset (FR-1c), and seeded demo accounts plus open self-registration make it low-value for a portfolio deploy (D14).
 
 ---
 
@@ -269,6 +273,10 @@ Stated plainly here and in the README, rather than left for a reviewer to discov
 - **No horizontal scaling or load testing** — this is a single API instance and a single database with no redundancy. If either goes down, the app goes down. Reasonable for a portfolio deploy; if raised, the answer is "here's what production would add" (managed DB with replicas/backups, multiple app instances behind a load balancer), not a claim that it's already handled.
 - **Feature set is intentionally narrow** — no real-time chat, email ingestion, or AI triage in v1, by design (see Phase 2 above). A deliberate trade-off to go deep on auth, security, and testing rather than wide on features, given the available time.
 - **No caching layer** — every read hits the database directly. Reasonable at this scale; worth naming as a next step if performance becomes a factor.
+- **Admin configuration actions aren't in the audit log** — the audit log is ticket-scoped (D3, D12), so user-management and category-management actions are recorded only through structured request logs, not a tamper-resistant table. A production system would add a system-level audit stream.
+- **Registration doesn't verify email ownership** — deferred to Phase 2 (D14).
+- **SLA deadlines run on a 24/7 clock and use hardcoded durations** — no business-hours calendar, no admin-editable tiers in v1 (D4, D11; both Phase 2)
+- **A deactivated user's access token stays valid for up to 15 minutes** — access tokens are verified without a database lookup (D1). Deactivation revokes refresh tokens immediately, so the window closes at the next refresh
 
 ---
 

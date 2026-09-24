@@ -165,3 +165,104 @@ reconsidered or scoped out explicitly, rather than added.
 **Rationale:** Hardcoding behind an interface gets real SLA-by-urgency behavior at minimal build cost, while staying swappable — a future Admin-configurable implementation is a new class behind the same interface, not a rewrite of the SLA background job or ticket-creation logic.
 
 **Trade-off accepted:** Changing a duration requires a code change + redeploy in v1. Not a second demonstration of admin-managed CRUD config — `Category` already covers that pattern.
+
+---
+
+## D12: Audit log stays ticket-scoped; admin configuration actions go to structured logs
+
+**Decision:** `AuditLog.TicketId` stays non-nullable. NFR-5 and NFR-10 are narrowed to ticket actions. User management (FR-14) and category management (FR-17) are recorded through structured request logging with the authenticated actor, not the audit table.
+
+**Context:** NFR-5 said all admin/agent actions are traceable via the audit log, but the log has a `TicketId` FK (D3, project-plan §2.2). Deactivating a user or editing a category has no ticket.
+
+**Alternatives considered:**
+- Nullable `TicketId` — the table then means two things, weakens the FK guarantee, and every ticket-history query needs an extra filter.
+- A second system-level log table — new entity, migration, endpoints, and tests; the same cost objection that ruled out `SlaPolicy` in D11.
+
+**Rationale:** One meaning per table keeps D3's append-only guarantee simple to reason about and test. Admin config actions are lower-stakes and are covered by Serilog request logs (method, path, user id, status) planned for Week 4.
+
+**Trade-off accepted:** Admin config changes aren't in a tamper-resistant table. Named in Known Limitations.
+
+---
+
+## D13: ASP.NET Core Identity in Infrastructure, `Role` stays an enum, lockout enabled
+
+**Decision:** `ApplicationUser : IdentityUser` lives in Infrastructure with a `Role` enum column; Identity's role tables are not used (D6 stands). Identity is accessed through an Application-layer interface. Lockout: 5 failed attempts, 15-minute lock (NFR-4). Domain entities reference users by `Guid` only, with no navigation property to `ApplicationUser`.
+
+**Context:** NFR-1 says "ASP.NET Core Identity defaults" and D6 says `Role` is an enum, and it was undecided how the two fit together. The answer changes the `User` table.
+
+**Alternatives considered:** Own `User` entity plus a standalone `PasswordHasher<User>` — keeps Domain free of Identity types, but lockout, reset tokens, and the normalized-email index would be hand-rolled security code.
+
+**Rationale:** Matches NFR-1 as written and uses battle-tested hashing, lockout, and token generation instead of writing them. The interface keeps Application and Domain testable without Identity (D2).
+
+**Trade-off accepted:** Identity's extra columns (e.g. `SecurityStamp`) appear in the users table, and Infrastructure depends on the Identity package. Lockout lets an attacker lock a victim out for 15 minutes; accepted because the duration is short and rate limiting is the primary control.
+
+---
+
+## D14: Password reset in v1 (FR-1c); email verification deferred to Phase 2
+
+**Decision:** Add FR-1c (forgot/reset password). Remove email verification from the v1 auth flow and list it in Phase 2.
+
+**Context:** Plan §2.5 and NFR-4 referenced both flows, but neither had an FR or API rows.
+
+**Alternatives considered:** Cut both — simplest, but the reset flow is where the security details live (single-use expiring token, no account enumeration, session revocation). Keep both — verification adds a blocked-until-verified state and resend logic for little extra learning.
+
+**Rationale:** Three-question test on FR-1c: maps to plan §2.5/NFR-4; cost is small given D13 (Identity issues and validates tokens, and FR-6 already needs an email sender); testable with a fake `IEmailSender` capturing the link.
+
+**Trade-off accepted:** Self-registration accepts any email address unverified. Named in Known Limitations.
+
+---
+
+## D15: Cross-customer ticket access returns 404, not 403
+
+**Decision:** A Customer requesting a ticket they don't own gets 404, identical to the response for a nonexistent ID. 403 is reserved for role violations.
+
+**Context:** Plan §4 originally expected 403, which confirms to an attacker that the ID exists.
+
+**Alternatives considered:** 403 — clearer for debugging, but confirms existence.
+
+**Rationale:** The ticket query filters by owner, so a ticket outside the caller's scope is simply not found. One filtered query, no separate ownership check after load.
+
+**Trade-off accepted:** Slightly harder to debug; documented in Swagger.
+
+**Testability:** Customer A `GET`s Customer B's ticket → 404, and the response body equals that of a random nonexistent ID. Customer calls a status-change endpoint → 403.
+
+---
+
+## D16: Priority changes recompute SLA deadlines, anchored to `CreatedAt`
+
+**Decision:** See FR-21e. Deadlines are recomputed from `CreatedAt` (or `LastCustomerReplyAt` for an armed Next Response) plus the new tier's duration. Existing overdue flags are never cleared.
+
+**Context:** D10 sets `Medium` at creation and deadlines are computed then; agents triage later. Without recomputation, triage would change nothing about the SLA, contradicting D11.
+
+**Alternatives considered:**
+- Keep creation-time deadlines — priority becomes display-only.
+- Re-anchor to the time of the change — an agent could reset the clock by toggling priority, hiding real wait time.
+
+**Rationale:** Anchoring to `CreatedAt` makes each deadline a pure function of (`CreatedAt`, `Priority`) — deterministic and not gameable.
+
+**Trade-off accepted:** Raising priority late can make a ticket instantly overdue. That is intended: the ticket really has been waiting that long.
+
+**Testability:** With `FakeTimeProvider`: create a Medium ticket at T0; at T0+3h set Urgent → deadline is T0+1h and the next sweep flags it; downgrade to Low → the flag stays set and the deadline becomes T0+8h.
+
+---
+
+## D17: Ticket lifecycle edge rules
+
+**Decision:**
+- Status transitions follow the table in FR-9.
+- Comments are allowed only in Open or In Progress (FR-5).
+- Ticket creation fails if no active Agent exists (FR-20a).
+- An Agent with Open or In Progress tickets can't be deactivated (FR-14).
+
+**Context:** FR-5 said "open ticket" ambiguously, FR-9 showed a linear arrow chain, FR-20a said "never unassigned" without covering zero agents, and FR-14 was silent about a deactivated agent's tickets.
+
+**Alternatives considered:**
+- Auto-reopen when a customer replies to a Resolved ticket — common in real tools, but couples reply handling to SLA re-arming; deferred.
+- Auto-reassign on deactivation — needs round-robin at deactivation time and more failure paths.
+- Fall back to an unassigned queue when no agents exist — contradicts FR-20a and reintroduces the self-claim race D5 removed.
+
+**Rationale:** Each rule is a single deterministic check with an obvious test.
+
+**Trade-off accepted:** A customer whose Resolved ticket isn't actually fixed must open a new one. An admin must reassign manually before deactivating an agent.
+
+**Testability:** One parameterized test per row of the transition table, plus one test per rule above.
