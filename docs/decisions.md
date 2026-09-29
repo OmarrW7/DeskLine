@@ -266,3 +266,30 @@ reconsidered or scoped out explicitly, rather than added.
 **Trade-off accepted:** A customer whose Resolved ticket isn't actually fixed must open a new one. An admin must reassign manually before deactivating an agent.
 
 **Testability:** One parameterized test per row of the transition table, plus one test per rule above.
+
+---
+
+## D19: Postgres trigger enforces AuditLog append-only, as defense-in-depth
+
+**Decision:** A trigger on `audit_log` raises an exception on any `UPDATE` or `DELETE`, run before the fact:
+
+```sql
+CREATE OR REPLACE FUNCTION prevent_audit_log_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER audit_log_no_update
+BEFORE UPDATE OR DELETE ON audit_log
+FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_mutation();
+```
+
+**Context:** NFR-9 was already satisfied by "no update/delete endpoint exists" (D3). This adds a second, independent layer that holds even if a future migration, a raw SQL script, or a bug bypasses the application layer entirely.
+
+**Rationale:** Passes the three-question test — maps to NFR-9, costs one small migration, and is deterministically testable (attempt a raw `UPDATE`, assert it throws).
+
+**Trade-off accepted:** One extra migration to maintain; genuine data corrections require a compensating entry, never an edit — same trade-off D3 already accepted.
+
+**Testability:** Integration test opens a raw connection, attempts `UPDATE audit_log SET action = 'x' WHERE id = ...`, and asserts a Postgres exception is thrown.
