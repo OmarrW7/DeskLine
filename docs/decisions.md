@@ -293,3 +293,20 @@ FOR EACH ROW EXECUTE FUNCTION prevent_audit_log_mutation();
 **Trade-off accepted:** One extra migration to maintain; genuine data corrections require a compensating entry, never an edit — same trade-off D3 already accepted.
 
 **Testability:** Integration test opens a raw connection, attempts `UPDATE audit_log SET action = 'x' WHERE id = ...`, and asserts a Postgres exception is thrown.
+
+---
+
+## D20: Detected refresh-token reuse revokes every session for that user, not just the reused call
+
+**Decision:** When `POST /auth/refresh` is called with a token that has already been rotated (`RevokedAt` already set — D1/D7's reuse signal), the server now does two things instead of one: it still rejects that call with `401`, and it additionally revokes every other `RefreshToken` row for that `UserId`, using the same "revoke all for user" operation already built for `logout-all` (FR-1b) and password reset (D14).
+
+**Context:** Rotation (D1) and per-row revocation (D7) already detect reuse and reject the one call it arrives on. But a reused token is not an ordinary expired-token error — it's the signature of a token existing in two places at once (e.g. stolen and used by an attacker, then presented again by the legitimate client). Rejecting only the one call leaves any *other* session the attacker already opened with that stolen token untouched.
+
+**Alternatives considered:**
+- **Leave it at per-call rejection (status quo before this decision)** — simplest, and the stolen token itself is already dead the moment it's rotated once. Rejected as the final answer because it leaves an attacker's already-issued session (the one created from the first, successful use of the stolen token) valid until it expires naturally — up to 7 days.
+
+**Rationale:** No new mechanism is introduced — `RevokeAllForUserAsync` already exists and is already exercised by FR-1b/D14. This decision is strictly about calling it from one more place: the reuse-detected branch of the refresh handler. The cost is a single added call in an existing conditional; the behavior it buys (closing the one scenario D7's "independently revocable" design didn't fully close) is disproportionately larger than the code change.
+
+**Trade-off accepted:** A false-positive reuse signal — e.g. a client retrying a dropped network response after the first attempt actually succeeded server-side — now logs the user out of every device instead of just failing the one duplicate call. Judged acceptable: the scenario is rare, and failing safe (logging the user out everywhere) is the right default for something that looks like token theft, consistent with how FR-1b/D14 already treat "something serious happened to this account."
+
+**Testability:** Deterministic, no timing or concurrency simulation needed. Seed two valid `RefreshToken` rows for the same `UserId` (simulating two devices). Rotate the first (simulate a normal refresh). Call refresh again with the now-revoked original token → assert `401`. Assert the second row's `RevokedAt` is now also set.
