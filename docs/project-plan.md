@@ -145,11 +145,11 @@ This is the project's security design document, and among the most interview-rel
 **End of Week 1 deliverables:**
 
 - [✅] Requirements doc (functional + non-functional)
-- [ ] ERD
-- [ ] API contract table
-- [ ] Architecture diagram + folder structure sketch
-- [ ] 2 auth sequence diagrams
-- [ ] Threat model table
+- [✅] ERD
+- [✅] API contract table
+- [✅] Architecture diagram + folder structure sketch
+- [✅] 2 auth sequence diagrams
+- [✅] Threat model table
 
 Implementation does not begin until all deliverables above are complete and reviewed.
 

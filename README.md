@@ -2,7 +2,7 @@
 
 A multi-role helpdesk ticketing system built to demonstrate production-level practices in authentication, security, and system design — not just CRUD.
 
-**Status:** 🟡 Design phase in progress
+**Status:** ✅ System design complete — backend build starting
 
 ---
 
@@ -87,7 +87,7 @@ Design artifacts are committed early and intentionally — the git history itsel
 | Phase | Status |
 |---|---|
 | Environment setup | ✅ Done |
-| System design (requirements, ERD, architecture, threat model) | 🟡 In progress |
+| System design (requirements, ERD, architecture, threat model) | ✅ Done |
 | Backend build (auth, tickets, SLA, audit log) | ⬜ Not started |
 | Frontend build (React) | ⬜ Not started |
 | Security hardening pass | ⬜ Not started |
